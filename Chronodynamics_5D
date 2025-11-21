@@ -1,0 +1,186 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from numba import njit, prange
+import time
+
+print("--- FULL BUNDLE SIMULATION: R3 x S2 ---")
+print("Warning: This is a computationally intensive 5D simulation.")
+
+# === ПАРАМЕТРЫ ===
+# Пространственная сетка
+NX, NY, NZ = 20, 20, 20  # 20x20x20 точек пространства
+# Угловая сетка (Сфера в каждой точке)
+N_THETA = 12             # Разрешение по углу theta
+N_PHI = 24               # Разрешение по углу phi (2*theta)
+
+# Физика
+KAPPA = 2.0              # Жесткость самой сферы (angular stiffness)
+ITERATIONS = 5000        # Количество шагов релаксации
+SOR_FACTOR = 1.4         # Ускоритель сходимости
+
+# === ГЕОМЕТРИЯ СФЕРЫ (Precomputed) ===
+print("Initializing 5D Manifold Geometry...")
+
+theta = np.linspace(0, np.pi, N_THETA)
+phi = np.linspace(0, 2*np.pi, N_PHI)
+# Векторы нормали для каждой точки на сфере
+# shape: (N_THETA, N_PHI)
+SinTh = np.sin(theta[:, None])
+CosTh = np.cos(theta[:, None])
+CosPhi = np.cos(phi[None, :])
+SinPhi = np.sin(phi[None, :])
+
+Nx = SinTh * CosPhi
+Ny = SinTh * SinPhi
+Nz = CosTh * np.ones_like(phi)[None, :]
+
+# Дифференциал площади для интегралов (sin(theta) dtheta dphi)
+dOmega = SinTh * (np.pi/N_THETA) * (2*np.pi/N_PHI)
+
+# === ЯДРО СИМУЛЯЦИИ (Numba JIT) ===
+# Мы используем JIT-компиляцию, иначе это будет работать вечность.
+
+@njit(parallel=True, fastmath=True)
+def solve_bundle(T, Source, n_theta, n_phi, nx_size, ny_size, nz_size, kappa, iterations):
+    """
+    Решает уравнения поля для 5-мерного массива T[x,y,z,th,ph].
+    """
+    # Временные массивы не нужны, работаем in-place (метод Гаусса-Зейделя)
+    
+    for it in range(iterations):
+        # Параллелим по пространству
+        for x in prange(1, nx_size-1):
+            for y in range(1, ny_size-1):
+                for z in range(1, nz_size-1):
+                    
+                    # В каждой точке пространства (x,y,z) решаем уравнение на Сфере
+                    # Лапласиан = (Соседи - Центр)
+                    
+                    # 1. Сумма пространственных соседей (по x, y, z) для всей сферы разом
+                    # T_spatial_avg[th, ph]
+                    T_spatial_sum = (T[x+1, y, z, :, :] + T[x-1, y, z, :, :] +
+                                     T[x, y+1, z, :, :] + T[x, y-1, z, :, :] +
+                                     T[x, y, z+1, :, :] + T[x, y, z-1, :, :])
+                    
+                    # 2. Внутрисферное взаимодействие (угловой Лапласиан)
+                    # Простое приближение: среднее по соседям в сетке theta/phi
+                    # Учет периодичности по phi
+                    
+                    for th in range(n_theta):
+                        for ph in range(n_phi):
+                            
+                            # Индексы соседей на сфере
+                            th_up = max(0, th-1)
+                            th_dn = min(n_theta-1, th+1)
+                            ph_lf = (ph - 1 + n_phi) % n_phi
+                            ph_rt = (ph + 1) % n_phi
+                            
+                            T_ang_sum = (T[x,y,z,th_up,ph] + T[x,y,z,th_dn,ph] +
+                                         T[x,y,z,th,ph_lf] + T[x,y,z,th,ph_rt])
+                            
+                            # Источник (Заряд): деформирует сферу в направлении диполя
+                            # Source[x,y,z] * cos(theta) - упрощенно для диполя по Z
+                            # В нашей модели заряд - это "выпуклость" на сфере.
+                            src_val = Source[x,y,z] * Nz[th, ph] 
+                            
+                            # Уравнение: (6 + 4*kappa) * T = Spatial_Sum + kappa*Ang_Sum + Source
+                            # (6 соседей в пространстве, 4 на сфере)
+                            
+                            val_new = (T_spatial_sum[th, ph] + kappa * T_ang_sum + src_val) / (6.0 + 4.0 * kappa)
+                            
+                            # SOR (ускорение)
+                            T[x,y,z,th,ph] = T[x,y,z,th,ph] * (1 - SOR_FACTOR) + val_new * SOR_FACTOR
+                    
+                    # 3. TIME BUDGET CONSTRAINT (Жесткое условие)
+                    # Сумма по сфере должна быть константой (4*pi).
+                    # Мы вычисляем среднее и вычитаем его (возвращаем к вакууму).
+                    
+                    current_sum = 0.0
+                    for th in range(n_theta):
+                        for ph in range(n_phi):
+                            current_sum += T[x,y,z,th,ph]
+                    
+                    mean_val = current_sum / (n_theta * n_phi)
+                    # Коррекция (Target mean = 1.0)
+                    correction = 1.0 - mean_val
+                    
+                    for th in range(n_theta):
+                        for ph in range(n_phi):
+                            T[x,y,z,th,ph] += correction
+
+    return T
+
+# === ИНИЦИАЛИЗАЦИЯ ПОЛЯ ===
+# 5-мерный массив! (Space x,y,z  x  Angle th,ph)
+print(f"Allocating memory for {NX}x{NY}x{NZ}x{N_THETA}x{N_PHI} tensor...")
+T_field = np.ones((NX, NY, NZ, N_THETA, N_PHI), dtype=np.float32)
+
+# Источники (Заряды)
+Source_Field = np.zeros((NX, NY, NZ), dtype=np.float32)
+center = NX // 2
+# Диполь по оси Z
+Source_Field[center, center, center - 4] = 50.0  # +Q
+Source_Field[center, center, center + 4] = -50.0 # -Q
+
+# === ЗАПУСК РАСЧЕТА ===
+start_time = time.time()
+print(f"Running relaxation ({ITERATIONS} steps)... Please wait.")
+
+# Первый запуск numba (компиляция) может занять пару секунд
+T_field = solve_bundle(T_field, Source_Field, N_THETA, N_PHI, NX, NY, NZ, KAPPA, ITERATIONS)
+
+end_time = time.time()
+print(f"Simulation finished in {end_time - start_time:.2f} seconds.")
+
+# === АНАЛИЗ РЕЗУЛЬТАТОВ (ПРОЕКЦИЯ) ===
+print("Calculating emergent Vector Potential (j=1 mode)...")
+
+# Мы хотим увидеть, возник ли векторный поток (электрическое поле) из анизотропии сфер.
+# A_z = Integral( T * n_z ) dOmega
+# A_x = Integral( T * n_x ) dOmega
+
+Ax_field = np.zeros((NX, NY, NZ))
+Az_field = np.zeros((NX, NY, NZ))
+
+# Интегрируем моменты
+for x in range(NX):
+    for y in range(NY):
+        for z in range(NZ):
+            # Сфера в этой точке
+            sphere = T_field[x,y,z,:,:]
+            # Интеграл (сумма взвешенная на dOmega) - упрощенно среднее
+            # Проекция на ось Z
+            Az_field[x,y,z] = np.mean(sphere * Nz)
+            # Проекция на ось X
+            Ax_field[x,y,z] = np.mean(sphere * Nx)
+
+# === ВИЗУАЛИЗАЦИЯ ===
+print("Visualizing Emergent Field...")
+
+plt.figure(figsize=(12, 6))
+
+# Срез по Y (середина)
+slice_y = NY // 2
+
+# 1. Поле T (анизотропия)
+# Показать сложно, покажем эффективный потенциал A_z
+plt.subplot(1, 2, 1)
+plt.imshow(Az_field[:, slice_y, :].T, cmap='RdBu_r', origin='lower')
+plt.title("Emergent Vector Potential $A_z$ (from $S^2$ bundle)")
+plt.colorbar(label="Dipole Anisotropy Strength")
+
+# 2. Векторное поле (Поток времени)
+plt.subplot(1, 2, 2)
+X, Z = np.meshgrid(np.arange(NX), np.arange(NZ))
+# Берем вектора в плоскости
+U = Ax_field[:, slice_y, :].T
+V = Az_field[:, slice_y, :].T
+# Рисуем поток
+plt.streamplot(X, Z, U, V, color='k', density=1.5, linewidth=1)
+plt.title("Time Flow Streamlines (Electric Field Lines)")
+plt.xlim(0, NX-1)
+plt.ylim(0, NZ-1)
+
+plt.tight_layout()
+plt.show()
