@@ -1,0 +1,72 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+def generate_screening_image():
+    print("--- GENERATING SCREENING IMAGE (Section 5.2) ---")
+    
+    N = 40
+    ITERATIONS = 3000
+    STIFFNESS = 0.36 
+    
+    phi = np.zeros((N, N, N))
+    rho = np.zeros((N, N, N))
+    
+    # Диполь
+    center = N // 2
+    rho[center, center, center-4] = 1.0
+    rho[center, center, center+4] = -1.0
+    
+    def solve(constrained):
+        phi.fill(0)
+        decay = 1.0 - (STIFFNESS * 0.1) if constrained else 1.0
+        
+        for _ in range(ITERATIONS):
+            p = phi
+            neighbors = (np.roll(p, 1, 0) + np.roll(p, -1, 0) +
+                         np.roll(p, 1, 1) + np.roll(p, -1, 1) +
+                         np.roll(p, 1, 2) + np.roll(p, -1, 2))
+            phi_new = (neighbors + rho) / 6.0
+            if constrained: phi_new *= decay
+            phi_new[0,:,:]=0; phi_new[-1,:,:]=0 
+            phi[:] = phi_new
+        
+        # Энергия
+        gy, gx, gz = np.gradient(phi)
+        E = np.sum(gx**2 + gy**2 + gz**2)
+        return phi.copy(), E
+
+    print("Simulating Free Vacuum...")
+    field_free, E_free = solve(False)
+    
+    print("Simulating Constrained Vacuum...")
+    field_const, E_const = solve(True)
+    
+    epsilon = E_free / E_const
+    print(f"Epsilon = {epsilon:.4f}")
+    
+    # === ИСПРАВЛЕННАЯ ВИЗУАЛИЗАЦИЯ ===
+    plt.figure(figsize=(12, 5))
+    slice_idx = N // 2
+    
+    # Настройка контраста:
+    # Берем 20% от максимальной яркости. Всё, что ярче, будет просто красным/синим.
+    # Это позволит увидеть "ореол" поля, где и видна экранировка.
+    limit = np.max(np.abs(field_free)) * 0.2
+    
+    # 1. Свободный вакуум
+    plt.subplot(1, 2, 1)
+    plt.imshow(field_free[:, slice_idx, :], cmap='RdBu_r', vmin=-limit, vmax=limit)
+    plt.title("Free Vacuum (Standard)")
+    plt.colorbar()
+    
+    # 2. Экранированный вакуум (Ваша теория)
+    plt.subplot(1, 2, 2)
+    plt.imshow(field_const[:, slice_idx, :], cmap='RdBu_r', vmin=-limit, vmax=limit)
+    plt.title(rf"Constrained Vacuum ($\epsilon \approx {epsilon:.2f}$)")
+    plt.colorbar()
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    generate_screening_image()
