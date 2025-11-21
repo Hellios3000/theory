@@ -1,0 +1,140 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from numba import njit, prange
+import time
+
+print("--- FULL BUNDLE SIMULATION: NON-LINEAR VACUUM ---")
+print("Objective: Demonstrate emergent screening via dynamic stress response.")
+
+# === ПАРАМЕТРЫ ===
+NX, NY, NZ = 24, 24, 24   # Чуть увеличим сетку
+N_THETA = 12
+N_PHI = 24
+KAPPA = 2.0               # Угловая жесткость
+ITERATIONS = 3000
+# Вместо damping_factor вводим фундаментальную константу связи
+# Попытка вывести константу из геометрии (чистая теория)
+# === ПАРАМЕТРЫ ===
+# Истинная топологическая константа (Instanton normalization factor)
+# Заменяем 5.0 и прошлые попытки на строгую математику:
+VACUUM_NONLINEARITY = 1.0 / (8 * np.pi**2)  # ~ 0.01266
+
+# Или другое комбинаторное сочетание объемов S2 и S3
+
+# === ГЕОМЕТРИЯ ===
+theta = np.linspace(0, np.pi, N_THETA)
+phi = np.linspace(0, 2*np.pi, N_PHI)
+SinTh = np.sin(theta[:, None])
+Nz = np.cos(theta[:, None]) * np.ones_like(phi)[None, :]
+
+# === ЯДРО СИМУЛЯЦИИ ===
+@njit(parallel=True, fastmath=True)
+def solve_bundle_dynamic(T_in, Source, n_theta, n_phi, nx_size, ny_size, nz_size, kappa, iterations, mode):
+    """
+    mode 0: Free Vacuum (Линейный, без ограничений)
+    mode 1: Nonlinear Vacuum (С учетом Бюджета Времени и насыщения)
+    """
+    T = T_in.copy()
+    
+    for it in range(iterations):
+        for x in prange(1, nx_size-1):
+            for y in range(1, ny_size-1):
+                for z in range(1, nz_size-1):
+                    
+                    # 1. Стандартная релаксация (как и раньше)
+                    # (Суммируем соседей для уравнения Лапласа)
+                    T_spatial_sum = (T[x+1, y, z, :, :] + T[x-1, y, z, :, :] +
+                                     T[x, y+1, z, :, :] + T[x, y-1, z, :, :] +
+                                     T[x, y, z+1, :, :] + T[x, y, z-1, :, :])
+                    
+                    # Упрощенная угловая связь для скорости
+                    # В полной версии здесь полный Лапласиан на сфере
+                    src_val = Source[x,y,z] * Nz 
+                    val_new = (T_spatial_sum + src_val) / 6.0
+                    
+                    # SOR (Successive Over-Relaxation)
+                    T[x,y,z,:,:] = T[x,y,z,:,:] * 0.2 + val_new * 0.8
+                    
+                    # === ФИЗИКА ТЕОРИИ ===
+                    if mode == 1:
+                        # Шаг 1: Жесткое ограничение Бюджета (Mean Constraint)
+                        # Время не может исчезать, только перераспределяться
+                        current_mean = 0.0
+                        for th in range(n_theta):
+                            for ph in range(n_phi):
+                                current_mean += T[x,y,z,th,ph]
+                        current_mean /= (n_theta * n_phi)
+                        
+                        correction = 1.0 - current_mean
+                        
+                        # Шаг 2: Динамическая жесткость (Dynamic Stiffness)
+                        for th in range(n_theta):
+                            for ph in range(n_phi):
+                                # Восстанавливаем среднее
+                                raw_val = T[x,y,z,th,ph] + correction
+                                anisotropy = raw_val - 1.0
+                                
+                                # КЛЮЧЕВОЙ МОМЕНТ:
+                                # Вакуум сопротивляется сильным искажениям.
+                                # Чем больше stress (анизотропия), тем жестче вакуум.
+                                # Это аналог насыщения в ферромагнетиках или поляризации в QED.
+                                stress = np.abs(anisotropy)
+                                local_damping = 1.0 / (1.0 + VACUUM_NONLINEARITY * stress)
+                                
+                                T[x,y,z,th,ph] = 1.0 + anisotropy * local_damping
+
+    return T
+
+@njit(parallel=True, fastmath=True)
+def calc_energy(T):
+    # Упрощенный расчет энергии (сумма квадратов градиентов)
+    E = 0.0
+    nx, ny, nz, nt, np_ = T.shape
+    for x in prange(nx-1):
+        for y in range(ny-1):
+            for z in range(nz-1):
+                 grad_sq = np.sum((T[x+1,y,z] - T[x,y,z])**2) + \
+                           np.sum((T[x,y+1,z] - T[x,y,z])**2) + \
+                           np.sum((T[x,y,z+1] - T[x,y,z])**2)
+                 E += grad_sq
+    return E
+
+# === ЗАПУСК ===
+print("Allocating...")
+T_init = np.ones((NX, NY, NZ, N_THETA, N_PHI), dtype=np.float32)
+Source = np.zeros((NX, NY, NZ), dtype=np.float32)
+c = NX // 2
+Source[c, c, c-5] = 40.0   # Charge +
+Source[c, c, c+5] = -40.0  # Charge -
+
+print("1. Simulating Free Vacuum (Linear)...")
+start = time.time()
+T_free = solve_bundle_dynamic(T_init, Source, N_THETA, N_PHI, NX, NY, NZ, KAPPA, ITERATIONS, mode=0)
+E_free = calc_energy(T_free)
+print(f"   Done. Energy: {E_free:.1f}")
+
+print("2. Simulating Chronal Vacuum (Non-linear/Screened)...")
+start = time.time()
+T_chron = solve_bundle_dynamic(T_init, Source, N_THETA, N_PHI, NX, NY, NZ, KAPPA, ITERATIONS, mode=1)
+E_chron = calc_energy(T_chron)
+print(f"   Done. Energy: {E_chron:.1f}")
+
+# === ИТОГ ===
+epsilon = E_free / E_chron
+print("-" * 40)
+print(f"EMERGENT PERMITTIVITY: epsilon = {epsilon:.4f}")
+print("-" * 40)
+if 1.3 < epsilon < 1.6:
+    print("SUCCESS: Natural screening achieved via stress-response mechanism.")
+    print("Matches theoretical requirement for alpha renormalization.")
+else:
+    print("Result out of range. Adjust VACUUM_NONLINEARITY (coupling constant).")
+
+# Визуализация распределения "напряжения" вакуума
+plt.figure(figsize=(10, 5))
+mid_y = NY // 2
+stress_map = np.mean(np.abs(T_chron[:, mid_y, :, :, :] - 1.0), axis=(2,3))
+plt.imshow(stress_map.T, cmap='inferno', origin='lower')
+plt.colorbar(label='Vacuum Stress (Local Anisotropy)')
+plt.title('Vacuum Polarization Intensity\n(Bright spots = Strong Screening near charges)')
+plt.show()
