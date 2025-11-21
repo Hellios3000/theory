@@ -1,0 +1,115 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+print("--- 3D VACUUM SCREENING SIMULATION ---")
+print("Solving field equations on a 3D lattice...")
+
+# === ПАРАМЕТРЫ ===
+N = 30           # Размер куба (30x30x30 точек)
+ITERATIONS = 10000 # Количество шагов релаксации (для точности)
+CONSTRAINT_STIFFNESS = 0.45 # Насколько жестко "Бюджет Времени" сопротивляется полю
+
+# Создаем 3D пространство
+# phi - это потенциал (скалярная мода времени A0)
+phi = np.zeros((N, N, N))
+rho = np.zeros((N, N, N)) # Плотность заряда
+
+# === УСТАНОВКА ЗАРЯДОВ ===
+# Помещаем "электрон" и "позитрон" в центр куба
+center = N // 2
+dist = 6 # Расстояние между ними
+pos_1 = (center, center, center - dist//2)
+pos_2 = (center, center, center + dist//2)
+
+rho[pos_1] = 1.0  # +Q
+rho[pos_2] = -1.0 # -Q
+
+print(f"Dipole placed at distance {dist} grid units.")
+
+# === ФУНКЦИЯ РЕШЕНИЯ ПОЛЯ (RELAXATION METHOD) ===
+def solve_field(stiffness_factor):
+    # Создаем копию поля
+    V = np.zeros((N, N, N))
+    
+    # Итеративное решение уравнения Лапласа с ограничением
+    # (Метод Якоби / Релаксации)
+    for k in range(ITERATIONS):
+        # V_new = среднее соседей + заряд
+        # Это дискретный Лапласиан: d^2V = -rho
+        
+        # Сдвигаем массивы для быстрого расчета соседей
+        V_up = np.roll(V, 1, axis=0)
+        V_dn = np.roll(V, -1, axis=0)
+        V_lf = np.roll(V, 1, axis=1)
+        V_rt = np.roll(V, -1, axis=1)
+        V_fw = np.roll(V, 1, axis=2)
+        V_bk = np.roll(V, -1, axis=2)
+        
+        # Базовое обновление (свободный вакуум)
+        # V = (сумма соседей + заряд) / 6
+        V_new = (V_up + V_dn + V_lf + V_rt + V_fw + V_bk + rho) / 6.0
+        
+        # === ВНЕДРЕНИЕ ВАШЕЙ ТЕОРИИ ===
+        # TIME BUDGET CONSTRAINT
+        # Если stiffness_factor > 0, вакуум "сопротивляется" отклонению от нуля.
+        # Это аналог массы фотона или экранировки в плазме.
+        # Формула: (Laplacian V) - (Constraint)*V = -rho
+        
+        if stiffness_factor > 0:
+            # Constraint "гасит" поле, возвращая его к среднему значению (0)
+            V_new = V_new * (1.0 - stiffness_factor * 0.1)
+            
+        V = V_new
+        
+    return V
+
+def calculate_energy(V):
+    """Считает энергию электрического поля E = Sum(grad V)^2"""
+    # Градиенты
+    gy, gx, gz = np.gradient(V)
+    energy_density = gx**2 + gy**2 + gz**2
+    return np.sum(energy_density)
+
+# === ЗАПУСК 1: СВОБОДНЫЙ ВАКУУМ (QED, bare) ===
+print("1. Simulating Free Vacuum (Standard Model)...")
+V_free = solve_field(stiffness_factor=0.0)
+E_free = calculate_energy(V_free)
+print(f"   Energy (Free): {E_free:.4f}")
+
+# === ЗАПУСК 2: ВАКУУМ С БЮДЖЕТОМ (Ваша Теория) ===
+print("2. Simulating Time Budget Vacuum (Chronodynamics)...")
+# stiffness имитирует жесткость ограничения интеграла
+V_constrained = solve_field(stiffness_factor=CONSTRAINT_STIFFNESS)
+E_constrained = calculate_energy(V_constrained)
+print(f"   Energy (Constrained): {E_constrained:.4f}")
+
+# === РАСЧЕТ ЭКРАНИРОВКИ ===
+# Энергия в диэлектрике меньше в epsilon раз: U = U_0 / epsilon
+epsilon = E_free / E_constrained
+
+print("="*40)
+print(f"РЕЗУЛЬТАТ 3D СИМУЛЯЦИИ:")
+print(f"Calculated Vacuum Permittivity (epsilon): {epsilon:.4f}")
+print(f"Theoretical Prediction (Target): ~1.47")
+print("="*40)
+
+# === ВИЗУАЛИЗАЦИЯ ===
+print("Generating 2D slice visualization...")
+plt.figure(figsize=(12, 5))
+
+# Срез по центру Y
+slice_idx = N // 2
+
+plt.subplot(1, 2, 1)
+plt.imshow(V_free[:, slice_idx, :], cmap='RdBu_r', interpolation='bicubic')
+plt.title("Free Vacuum Potential ($1/r$)")
+plt.colorbar()
+
+plt.subplot(1, 2, 2)
+plt.imshow(V_constrained[:, slice_idx, :], cmap='RdBu_r', interpolation='bicubic')
+plt.title(f"Constrained Vacuum ($\\epsilon \\approx {epsilon:.2f}$)")
+plt.colorbar()
+
+plt.tight_layout()
+plt.show()
