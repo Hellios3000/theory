@@ -1,0 +1,67 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+def generate_hopfion_image():
+    print("--- GENERATING HOPFION IMAGE (Section 5.1) ---")
+    
+    # Параметры (Оптимальные из ваших тестов)
+    N = 100
+    L = 12.0
+    scale = 0.96  # Найденный вами оптимум, где Virial Ratio ~ 1.0
+    
+    print(f"Grid: {N}x{N}x{N}, Scale: {scale}")
+    x = np.linspace(-L/2, L/2, N)
+    X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
+    dx = x[1] - x[0]
+    r = np.sqrt(X**2 + Y**2 + Z**2)
+    
+    # Формирование Хопфиона (Q=1)
+    A = 2 * (scale * X)
+    B = 2 * (scale * Y)
+    C = 2 * (scale * Z)
+    D = (scale * r)**2 - 1
+    norm_S3 = A**2 + B**2 + C**2 + D**2 + 1e-12
+    
+    nx = 2 * (A*C + B*D) / norm_S3
+    ny = 2 * (B*C - A*D) / norm_S3
+    nz = (A**2 + B**2 - C**2 - D**2) / norm_S3
+
+    # Расчет энергии (для проверки)
+    gx_x, gx_y, gx_z = np.gradient(nx, dx)
+    gy_x, gy_y, gy_z = np.gradient(ny, dx)
+    gz_x, gz_y, gz_z = np.gradient(nz, dx)
+    E2 = gx_x**2 + gx_y**2 + gx_z**2 + gy_x**2 + gy_y**2 + gy_z**2 + gz_x**2 + gz_y**2 + gz_z**2
+    
+    # Skyrme term
+    H_xy = nx*(gy_x*gz_y - gz_x*gy_y) + ny*(gz_x*gx_y - gx_x*gz_y) + nz*(gx_x*gy_y - gy_x*gx_y)
+    H_yz = nx*(gy_y*gz_z - gz_y*gy_z) + ny*(gz_y*gx_z - gx_y*gz_z) + nz*(gx_y*gy_z - gy_y*gx_z)
+    H_zx = nx*(gy_z*gz_x - gz_z*gy_x) + ny*(gz_z*gx_x - gx_z*gz_x) + nz*(gx_z*gy_x - gy_z*gx_x)
+    E4 = H_xy**2 + H_yz**2 + H_zx**2
+    
+    Total_E = np.sum(E2 + E4) * dx**3
+    Norm_E = Total_E / (32 * np.pi**2)
+    
+    print(f"Energy: {Total_E:.2f} (Normalized: {Norm_E:.3f})")
+    
+    # Визуализация
+    print("Drawing...")
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Рисуем ядро
+    mask = np.abs(nz) > 0.5
+    step = 4 # Прореживание для красоты
+    colors = plt.cm.turbo((nz[mask][::step] + 1)/2)
+    
+    ax.quiver(X[mask][::step], Y[mask][::step], Z[mask][::step],
+              nx[mask][::step], ny[mask][::step], nz[mask][::step],
+              length=0.5, color=colors, alpha=0.8)
+              
+    ax.set_title(f"Hopfion (Electron) Structure\nScale={scale}, E={Norm_E:.2f} (in units of $32\pi^2$)")
+    ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    generate_hopfion_image()
